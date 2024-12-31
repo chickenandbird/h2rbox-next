@@ -111,6 +111,8 @@ def get_cls_results(det_results, annotations, class_id):
     cls_gts_ignore = []
     for ann in annotations:
         gt_inds = ann['labels'] == class_id
+        # import pdb
+        # pdb.set_trace()
         cls_gts.append(ann['bboxes'][gt_inds, :])
 
         if ann.get('labels_ignore', None) is not None:

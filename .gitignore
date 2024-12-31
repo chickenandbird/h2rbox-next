@@ -128,3 +128,6 @@ mmrotate/.mim
 /configs/selfsup/
 /h2rbox_retinanet/
 /configs/h2rbox_retinanet/
+
+#data
+data/

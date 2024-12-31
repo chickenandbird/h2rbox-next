@@ -64,3 +64,5 @@ def test_reresnet_backbone():
     assert feat[1].shape == torch.Size([1, 128, 4, 4])
     assert feat[2].shape == torch.Size([1, 256, 2, 2])
     assert feat[3].shape == torch.Size([1, 512, 1, 1])
+
+test_reresnet_backbone()

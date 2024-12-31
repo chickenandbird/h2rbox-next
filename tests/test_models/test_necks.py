@@ -114,3 +114,4 @@ def test_fpn():
     for i in range(fpn_model.num_outs):
         outs[i].shape[1] == out_channels
         outs[i].shape[2] == outs[i].shape[3] == s // (2**i)
+test_fpn()

@@ -99,6 +99,7 @@ class H2RBoxHead(RotatedFCOSHead):
         self.rect_classes = rect_classes
         self.angle_version = angle_version
 
+    #锚框、角度预测，包括尺度因子计入,这个是自回归分支？
     def forward_aug_single(self, x, scale, stride):
         reg_feat = x
         for reg_layer in self.reg_convs:
@@ -216,14 +217,14 @@ class H2RBoxHead(RotatedFCOSHead):
         pos_bbox_preds = flatten_bbox_preds[pos_inds]
         pos_angle_preds = flatten_angle_preds[pos_inds]
         pos_centerness = flatten_centerness[pos_inds]
-        pos_bbox_targets = flatten_bbox_targets[pos_inds]
+        pos_bbox_targets = flatten_bbox_targets[pos_inds]#这里用的是真实的bbox
         pos_gt_idx = flatten_gt_idx[pos_inds]
         pos_angle_targets = flatten_angle_targets[pos_inds]
         pos_centerness_targets = self.centerness_target(pos_bbox_targets)
         # centerness weighted iou loss
         centerness_denorm = max(
             reduce_mean(pos_centerness_targets.sum().detach()), 1e-6)
-
+#我现在看到这里了
         if len(pos_inds) > 0:
             cosa, sina = math.cos(rot), math.sin(rot)
             tf = flatten_cls_scores.new_tensor(

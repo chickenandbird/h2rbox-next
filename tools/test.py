@@ -46,7 +46,7 @@ def parse_args():
         action='store_true',
         help='Format the output results without perform evaluation. It is'
         'useful when you want to format the result to a specific format and '
-        'submit it to the test server')
+        'submit it to the test server')#修改为store_false,默认为true
     parser.add_argument(
         '--eval',
         type=str,
@@ -231,6 +231,8 @@ def main():
 
     rank, _ = get_dist_info()
     if rank == 0:
+        import pdb
+        pdb.set_trace()
         if args.out:
             print(f'\nwriting results to {args.out}')
             mmcv.dump(outputs, args.out)
