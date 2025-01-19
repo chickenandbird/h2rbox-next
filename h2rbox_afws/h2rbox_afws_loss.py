@@ -1,21 +1,26 @@
 from mmrotate.models.builder import ROTATED_LOSSES, build_loss
 import torch
-
+import pdb
 
 @ROTATED_LOSSES.register_module()
-class H2RBoxAFWSLoss(torch.nn.Module):
-    def __init__(self, center_loss_cfg, shape_loss_cfg, angle_loss_cfg,
+class H2RBoxAFWSLoss(torch.nn.Module):#包括center_loss,circle_loss,order_loss,hb_loss
+    def __init__(self, center_loss_cfg, order_loss_cfg, circle_loss_cfg,
                  reduction='mean', loss_weight=1.0):
         super(H2RBoxAFWSLoss, self).__init__()
         self.center_loss = build_loss(center_loss_cfg)
-        self.shape_loss = build_loss(shape_loss_cfg)
-        self.angle_loss = build_loss(angle_loss_cfg)
+        self.order_loss = build_loss(order_loss_cfg)#实际上就是角度
+        self.circle_loss = build_loss(circle_loss_cfg)#CircleIoULoss
+        # self.bbox_loss = build_loss(bbox_loss_cfg)
         self.reduction = reduction
         self.loss_weight = loss_weight
 
     def forward(self,
-                pred,
-                target,
+                pos_decoded_bbox_preds_aug,
+                pos_decoded_target_preds_aug,
+                _radius_aug,
+                _radius_target,
+                pos_angle_preds_aug,
+                pos_angle_targets,
                 weight=None,
                 avg_factor=None,
                 reduction_override=None):
@@ -38,28 +43,30 @@ class H2RBoxAFWSLoss(torch.nn.Module):
         assert reduction_override in (None, 'none', 'mean', 'sum')
         reduction = (
             reduction_override if reduction_override else self.reduction)
-        xy_pred = pred[..., :2]
-        xy_target = target[..., :2]
-        hbb_pred1 = torch.cat([-pred[..., 2:4], pred[..., 2:4]], dim=-1)
-        hbb_pred2 = hbb_pred1[..., [1, 0, 3, 2]]
-        hbb_target = torch.cat([-target[..., 2:4], target[..., 2:4]], dim=-1)
-        d_a_pred = pred[..., 4] - target[..., 4]
+        xy_pred = pos_decoded_bbox_preds_aug[..., :2]
+        xy_target = pos_decoded_target_preds_aug[..., :2]
+        d_a_pred = pos_angle_preds_aug-pos_angle_targets
 
         center_loss = self.center_loss(xy_pred, xy_target,
                                        weight=weight[:, None],
                                        reduction_override=reduction,
                                        avg_factor=avg_factor)
-        shape_loss1 = self.shape_loss(hbb_pred1, hbb_target,
-                                      weight=weight,
-                                      reduction_override=reduction,
-                                      avg_factor=avg_factor) + self.angle_loss(
+ 
+        _radius_aug = torch.clamp(_radius_aug,min=1e-5,max=1e5)
+        _radius_target = torch.clamp(_radius_target,min=1e-5,max=1e5)     
+        circle_loss = self.circle_loss(
+            xy_pred,
+            xy_target,
+            _radius_aug,
+            _radius_target
+        )
+
+        order_loss1 = self.order_loss(
             d_a_pred.sin(), torch.zeros_like(d_a_pred), weight=weight,
             reduction_override=reduction, avg_factor=avg_factor)
-        shape_loss2 = self.shape_loss(hbb_pred2, hbb_target,
-                                      weight=weight,
-                                      reduction_override=reduction,
-                                      avg_factor=avg_factor) + self.angle_loss(
+        order_loss2 = self.order_loss(
             d_a_pred.cos(), torch.zeros_like(d_a_pred), weight=weight,
             reduction_override=reduction, avg_factor=avg_factor)
-        loss_bbox = center_loss + torch.min(shape_loss1, shape_loss2)
+        loss_bbox = center_loss + torch.min(order_loss1, order_loss2) + 2*circle_loss
+        # pdb.set_trace()
         return self.loss_weight * loss_bbox

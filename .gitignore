@@ -131,3 +131,7 @@ mmrotate/.mim
 
 #data
 data/
+
+#checkpoints
+checkpoints/
+logs

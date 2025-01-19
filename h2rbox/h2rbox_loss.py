@@ -62,4 +62,6 @@ class H2RBoxLoss(torch.nn.Module):
             d_a_pred.cos(), torch.zeros_like(d_a_pred), weight=weight,
             reduction_override=reduction, avg_factor=avg_factor)
         loss_bbox = center_loss + torch.min(shape_loss1, shape_loss2)
+        # import pdb
+        # pdb.set_trace()
         return self.loss_weight * loss_bbox

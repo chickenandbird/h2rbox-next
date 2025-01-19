@@ -6,7 +6,10 @@ from mmcv.runner import force_fp32
 from mmdet.core import multi_apply, reduce_mean
 from mmrotate.core import multiclass_nms_rotated
 from mmrotate.core.bbox.transforms import obb2hbb
-
+from torch import nn
+from mmcv.cnn import Scale
+import pdb
+#求外接矩形
 def obb2xyxy(rbboxes):
     w = rbboxes[:, 2::5]
     h = rbboxes[:, 3::5]
@@ -25,6 +28,48 @@ def obb2xyxy(rbboxes):
     y2 = dy + dh / 2
     return torch.stack((x1, y1, x2, y2), -1)
 
+def compute_bounding_boxes(tensor):
+    # tensor的形状是 (N, 4, 2)，每个矩形由4个点（A, B, C, D）定义
+    # 提取每个矩形的四个点
+    x_min = torch.min(tensor[..., 0], dim=-1)[0]  # 计算每个矩形的最小x坐标
+    x_max = torch.max(tensor[..., 0], dim=-1)[0]  # 计算每个矩形的最大x坐标
+    y_min = torch.min(tensor[..., 1], dim=-1)[0]  # 计算每个矩形的最小y坐标
+    y_max = torch.max(tensor[..., 1], dim=-1)[0]  # 计算每个矩形的最大y坐标
+    # 计算外接矩形的宽度和高度
+    width = x_max - x_min
+    height = y_max - y_min
+
+    return torch.stack([width,height],dim=-1)
+
+def compute(_xy,_wh,cr_preds,order_preds):
+    _x = _xy[:,0]
+    _y = _xy[:,1]
+    _w = _wh[:,0]
+    _h = _wh[:,1]
+    cr_preds = torch.clamp(cr_preds,min=0,max=1)
+    _long = torch.clamp(torch.max(_wh,dim=-1)[0],min=1e-5)
+    _short = torch.clamp(torch.min(_wh,dim=-1)[0],min=1e-5)
+    _radius = torch.sqrt(0.25*(_long**2)+0.25*(_short*cr_preds[:,0])**2)#注意要限制以下pos_cr_preds的范围
+    ti0 = torch.stack([_x-torch.sqrt(torch.clamp(_radius**2-0.25*_h**2,min=1e-6)),_y-0.5*_h],dim=-1)
+    ti1 = torch.stack([_x+torch.sqrt(torch.clamp(_radius**2-0.25*_h**2,min=1e-6)),_y-0.5*_h],dim=-1)
+    bi0 = torch.stack([_x-torch.sqrt(torch.clamp(_radius**2-0.25*_h**2,min=1e-6)),_y+0.5*_h],dim=-1)
+    bi1 = torch.stack([_x+torch.sqrt(torch.clamp(_radius**2-0.25*_h**2,min=1e-6)),_y+0.5*_h],dim=-1)
+    li0 = torch.stack([_x-0.5*_w,_y-torch.sqrt(torch.clamp(_radius**2-0.25*_w**2,min=1e-6))],dim=-1)
+    li1 = torch.stack([_x-0.5*_w,_y+torch.sqrt(torch.clamp(_radius**2-0.25*_w**2,min=1e-6))],dim=-1)
+    ri0 = torch.stack([_x+0.5*_w,_y-torch.sqrt(torch.clamp(_radius**2-0.25*_w**2,min=1e-6))],dim=-1)
+    ri1 = torch.stack([_x+0.5*_w,_y+torch.sqrt(torch.clamp(_radius**2-0.25*_w**2,min=1e-6))],dim=-1)
+    _rbox0 = torch.cat([ti1,ri0,bi0,li1],dim=-1).unsqueeze(-2)
+    _rbox1 = torch.cat([ti0,ri0,bi1,li1],dim=-1).unsqueeze(-2)
+    _rbox2 = torch.cat([ti1,ri1,bi0,li0],dim=-1).unsqueeze(-2)
+    _rbox3 = torch.cat([ti0,ri1,bi1,li0],dim=-1).unsqueeze(-2)
+    _rbox = torch.cat([_rbox0,_rbox1,_rbox2,_rbox3],dim=-2)
+    order_preds   = torch.softmax(order_preds,dim=-1)
+    rbbox_preds = torch.sum(order_preds.unsqueeze(-1)*_rbox,dim=-2)
+    rbbox_first = torch.clamp(rbbox_preds[:,1]+rbbox_preds[:,3]-2.0*_xy[:,1],min=-1e5,max=1e5)
+    rbbox_second = torch.clamp(rbbox_preds[:,0]+rbbox_preds[:,2]-2.0*_xy[:,0],min=-1e5,max=1e5)
+    rbbox_second = torch.where(rbbox_second == 0, torch.tensor(1e-6,device=rbbox_second.device), rbbox_second)
+    angle_targets = torch.arctan(rbbox_first/rbbox_second)
+    return _radius,angle_targets,rbbox_preds
 
 @ROTATED_HEADS.register_module()
 class H2RBoxAFWSHead(RotatedFCOSHead):
@@ -99,9 +144,68 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
         self.rect_classes = rect_classes
         self.angle_version = angle_version
 
+    def _init_layers(self):
+        """Initialize layers of the head."""
+        super()._init_layers()
+        self.conv_cr = nn.Conv2d(self.feat_channels, 1, 3, padding=1)
+        self.conv_order = nn.Conv2d(self.feat_channels, 4, 3, padding=1)
+        self.scales = nn.ModuleList([Scale(1.0) for _ in self.strides])
+        if self.is_scale_angle:
+            self.scale_angle = Scale(1.0)
+
+    def forward_single(self, x, scale, stride):
+        """Forward features of a single scale level.
+
+        Args:
+            x (Tensor): FPN feature maps of the specified stride.
+            scale (:obj: `mmcv.cnn.Scale`): Learnable scale module to resize
+                the bbox prediction.
+            stride (int): The corresponding stride for feature maps, only
+                used to normalize the bbox prediction when self.norm_on_bbox
+                is True.
+        Returns:
+            tuple: scores for each class, bbox predictions, angle predictions \
+                and centerness predictions of input feature maps.
+        """
+        cls_feat = x
+        reg_feat = x
+
+        for cls_layer in self.cls_convs:
+            cls_feat = cls_layer(cls_feat)
+        cls_score = self.conv_cls(cls_feat)
+
+        for reg_layer in self.reg_convs:
+            reg_feat = reg_layer(reg_feat)
+        bbox_pred = self.conv_reg(reg_feat)
+
+        if self.centerness_on_reg:
+            centerness = self.conv_centerness(reg_feat)
+        else:
+            centerness = self.conv_centerness(cls_feat)
+        # scale the bbox_pred of different level
+        # float to avoid overflow when enabling FP16
+        bbox_pred = scale(bbox_pred).float()
+        if self.norm_on_bbox:
+            # bbox_pred needed for gradient computation has been modified
+            # by F.relu(bbox_pred) when run with PyTorch 1.10. So replace
+            # F.relu(bbox_pred) with bbox_pred.clamp(min=0)
+            bbox_pred = bbox_pred.clamp(min=0)
+            if not self.training:
+                bbox_pred *= stride
+        else:
+            bbox_pred = bbox_pred.exp()
+        cr_pred = self.conv_cr(reg_feat)
+        order_pred = self.conv_order(cls_feat)
+        # if self.is_scale_angle:
+        #     angle_pred = self.scale_angle(angle_pred).float()
+        return cls_score, bbox_pred, cr_pred, centerness, order_pred
+    
     #锚框、角度预测，包括尺度因子计入
     def forward_aug_single(self, x, scale, stride):
         reg_feat = x
+        cls_feat = x
+        for cls_layer in self.cls_convs:
+            cls_feat = cls_layer(cls_feat)        
         for reg_layer in self.reg_convs:
             reg_feat = reg_layer(reg_feat)
         bbox_pred = self.conv_reg(reg_feat)
@@ -112,10 +216,12 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
                 bbox_pred *= stride
         else:
             bbox_pred = bbox_pred.exp()
-        angle_pred = self.conv_angle(reg_feat)
-        if self.is_scale_angle:
-            angle_pred = self.scale_angle(angle_pred).float()
-        return bbox_pred, angle_pred
+        cr_pred = self.conv_angle(reg_feat)
+        # if self.is_scale_angle:
+        #     angle_pred = self.scale_angle(angle_pred).float()
+        cr_pred = self.conv_cr(reg_feat)
+        order_pred = self.conv_order(cls_feat)
+        return bbox_pred, cr_pred,order_pred
 
     def forward_aug(self, feats):
         return multi_apply(self.forward_aug_single, feats, self.scales,
@@ -161,11 +267,11 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
              gt_labels,
              img_metas,
              gt_bboxes_ignore=None):
-        cls_scores, bbox_preds, angle_preds, centernesses = outs
-        bbox_preds_aug, angle_preds_aug = outs_aug
+        cls_scores, bbox_preds, cr_preds, centernesses, order_preds = outs
+        bbox_preds_aug, cr_preds_aug,order_preds_aug = outs_aug
 
         assert len(cls_scores) == len(bbox_preds) \
-               == len(angle_preds) == len(centernesses)
+               == len(cr_preds) == len(centernesses) == len(order_preds)
         featmap_sizes = [featmap.size()[-2:] for featmap in cls_scores]
         all_level_points = self.prior_generator.grid_priors(
             featmap_sizes,
@@ -184,18 +290,23 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
             bbox_pred.permute(0, 2, 3, 1).reshape(-1, 4)
             for bbox_pred in bbox_preds
         ]
-        flatten_angle_preds = [
+        flatten_cr_preds = [
             angle_pred.permute(0, 2, 3, 1).reshape(-1, 1)
-            for angle_pred in angle_preds
+            for angle_pred in cr_preds
         ]
         flatten_centerness = [
             centerness.permute(0, 2, 3, 1).reshape(-1)
             for centerness in centernesses
         ]
+        flatten_order_preds = [
+            order_pred.permute(0, 2, 3, 1).reshape(-1, 4)
+            for order_pred in order_preds
+        ]
         flatten_cls_scores = torch.cat(flatten_cls_scores)
         flatten_bbox_preds = torch.cat(flatten_bbox_preds)
-        flatten_angle_preds = torch.cat(flatten_angle_preds)
+        flatten_cr_preds = torch.cat(flatten_cr_preds)
         flatten_centerness = torch.cat(flatten_centerness)
+        flatten_order_preds = torch.cat(flatten_order_preds)
         flatten_labels = torch.cat(labels)
         flatten_bbox_targets = torch.cat(bbox_targets)
         flatten_angle_targets = torch.cat(angle_targets)
@@ -212,12 +323,13 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
             len(pos_inds), dtype=torch.float, device=bbox_preds[0].device)
         num_pos = max(reduce_mean(num_pos), 1.0)
         loss_cls = self.loss_cls(
-            flatten_cls_scores, flatten_labels, avg_factor=num_pos)
+            flatten_cls_scores, flatten_labels, avg_factor=num_pos)#cls损失在这里算完了
 
         pos_bbox_preds = flatten_bbox_preds[pos_inds]
-        pos_angle_preds = flatten_angle_preds[pos_inds]
+        pos_cr_preds = flatten_cr_preds[pos_inds]
         pos_centerness = flatten_centerness[pos_inds]
         pos_bbox_targets = flatten_bbox_targets[pos_inds]
+        pos_order_preds = flatten_order_preds[pos_inds]
         pos_gt_idx = flatten_gt_idx[pos_inds]
         pos_angle_targets = flatten_angle_targets[pos_inds]
         pos_centerness_targets = self.centerness_target(pos_bbox_targets)
@@ -236,10 +348,10 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
             offset = 0
             for h, w in featmap_sizes:
                 level_mask = (offset <= pos_inds).logical_and(
-                    pos_inds < offset + num_imgs * h * w)
+                    pos_inds < offset + num_imgs * h * w)#每一层的正样本索引
                 pos_ind = pos_inds[level_mask] - offset
                 xy = torch.stack((pos_ind % w, (pos_ind // w) % h), dim=-1)
-                b = pos_ind // (w * h)
+                b = pos_ind // (w * h)#层级
                 ctr = tf.new_tensor([[(w - 1) / 2, (h - 1) / 2]])
                 xy_aug = ((xy - ctr).matmul(tf.T) + ctr).round().long()
                 x_aug = xy_aug[..., 0]
@@ -251,44 +363,54 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
                 pos_inds_aug.append(pos_ind_aug[xy_valid_aug] + offset)
                 pos_inds_aug_b.append(b[xy_valid_aug])
                 offset += num_imgs * h * w
-
+#上面for循环的作用得到增强图像正样本位置inds，以及正样本所在的特征图层级，增强后有效的正样本
             has_valid_aug = pos_inds_aug_v.any()
 
             pos_points = flatten_points[pos_inds]
             pos_labels = flatten_labels[pos_inds]
-            if has_valid_aug:
+            if has_valid_aug:#增强图像有正样本
                 pos_inds_aug = torch.cat(pos_inds_aug)
                 pos_inds_aug_b = torch.cat(pos_inds_aug_b)
                 flatten_bbox_preds_aug = [
                     bbox_pred.permute(0, 2, 3, 1).reshape(-1, 4)
                     for bbox_pred in bbox_preds_aug
                 ]
-                flatten_angle_preds_aug = [
-                    angle_pred.permute(0, 2, 3, 1).reshape(-1, 1)
-                    for angle_pred in angle_preds_aug
+                flatten_cr_preds_aug = [
+                    cr_pred_aug.permute(0, 2, 3, 1).reshape(-1, 1)
+                    for cr_pred_aug in cr_preds_aug
                 ]
+                flatten_order_preds_aug = [
+                    order_pred_aug.permute(0, 2, 3, 1).reshape(-1, 4)
+                    for order_pred_aug in order_preds_aug
+                ]                
                 flatten_bbox_preds_aug = torch.cat(flatten_bbox_preds_aug)
-                flatten_angle_preds_aug = torch.cat(flatten_angle_preds_aug)
+                flatten_cr_preds_aug = torch.cat(flatten_cr_preds_aug)
+                flatten_order_preds_aug = torch.cat(flatten_order_preds_aug)
                 pos_bbox_preds_aug = flatten_bbox_preds_aug[pos_inds_aug]
-                pos_angle_preds_aug = flatten_angle_preds_aug[pos_inds_aug]
+                pos_cr_preds_aug = flatten_cr_preds_aug[pos_inds_aug]
+                pos_order_preds_aug = flatten_order_preds_aug[pos_inds_aug]
                 pos_points_aug = flatten_points[pos_inds_aug]
+            #到了这里
             if self.seprate_angle:
                 bbox_coder = self.h_bbox_coder
             else:
+                angle_use = torch.zeros(*pos_bbox_preds.size()[:-1],1).to(pos_bbox_preds.device)
                 bbox_coder = self.bbox_coder
-                pos_bbox_preds = torch.cat([pos_bbox_preds, pos_angle_preds],
+                pos_bbox_preds = torch.cat([pos_bbox_preds, angle_use],
                                            dim=-1)
                 pos_bbox_targets = torch.cat(
                     [pos_bbox_targets, pos_angle_targets], dim=-1)
                 if has_valid_aug:
+                    angle_use = torch.zeros(*pos_bbox_preds_aug.size()[:-1],1).to(pos_bbox_preds_aug.device)
                     pos_bbox_preds_aug = torch.cat(
-                        [pos_bbox_preds_aug, pos_angle_preds_aug], dim=-1)
+                        [pos_bbox_preds_aug, angle_use], dim=-1)
 
+            #进去以前，也就是模型的输出(left,top,right,bottom)
             pos_decoded_bbox_preds = bbox_coder.decode(pos_points,
-                                                       pos_bbox_preds)
+                                                       pos_bbox_preds)#原图预测
             pos_decoded_target_preds = bbox_coder.decode(
-                pos_points, pos_bbox_targets)
-
+                pos_points, pos_bbox_targets)#原图真实gt
+            #这里是[ctr, wh, angle_regular]
             if self.weak_supervised:
                 loss_bbox = self.loss_bbox(  # todo
                     obb2xyxy(pos_decoded_bbox_preds),
@@ -303,9 +425,9 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
                     avg_factor=centerness_denorm)
 
                 if self.seprate_angle:
-                    loss_angle = self.loss_angle(
-                        pos_angle_preds, pos_angle_targets, avg_factor=num_pos)
-
+                    # loss_angle = self.loss_angle(
+                    #     pos_angle_preds, pos_angle_targets, avg_factor=num_pos)
+                    pass
             if has_valid_aug:
 
                 pos_decoded_bbox_preds_aug = bbox_coder.decode(
@@ -330,21 +452,29 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
                     pos_angle_targets_aug = best_pos_decoded_bbox_preds[
                                             pos_inds_aug_v, 4:] + rot
                 else:
-                    _xy = pos_decoded_bbox_preds[pos_inds_aug_v, :2]
+                    _xy = pos_decoded_bbox_preds[pos_inds_aug_v, :2]#212
                     _wh = pos_decoded_bbox_preds[pos_inds_aug_v, 2:4]
-                    pos_angle_targets_aug = pos_decoded_bbox_preds[pos_inds_aug_v,
-                                            4:] + rot
+                    _radius,pos_angle_targets,pos_rbbox_preds = compute(_xy,_wh,pos_cr_preds[pos_inds_aug_v],pos_order_preds[pos_inds_aug_v])#这里是原图的结果
+                    pos_angle_targets += rot
+                pos_rbbox_preds = pos_rbbox_preds.view(-1,4,2)
 
-                _xy = (_xy - _ctr).matmul(tf.T) + _ctr
-
+                pos_rbbox_preds_target = torch.bmm(pos_rbbox_preds-_ctr.unsqueeze(1),tf.T.unsqueeze(0).expand(pos_rbbox_preds.size(0),-1,-1))+_ctr.unsqueeze(1)
+                # AB_length = torch.sqrt(torch.sum((pos_rbbox_preds[:,0]-pos_rbbox_preds[:,1])**2),dim=1)
+                # BC_length = torch.sqrt(torch.sum((pos_rbbox_preds[:,1]-pos_rbbox_preds[:,2])**2),dim=1)
+                # _long_target = torch.max(torch.cat([AB_length,BC_length],dim=-1))[0]
+                # _short_target = torch.min(torch.cat([AB_length,BC_length],dim=-1))[0]
+                # pos_cr_target_aug = 2.0*torch.sqrt(_radius**2-0.25*_long_target**2)/_short_target
+                
+                _xy_target = (_xy - _ctr).matmul(tf.T) + _ctr#[361,2]
+                _wh_target = compute_bounding_boxes(pos_rbbox_preds_target)
                 if self.rotation_agnostic_classes:
                     pos_labels_aug = pos_labels[pos_inds_aug_v]
                     pos_angle_targets_aug = self._process_rotation_agnostic(
                         pos_angle_targets_aug,
                         pos_labels_aug, dim=None)
-
+                angle_use = torch.zeros(*_wh_target.size()[:-1],1).to(_wh_target.device)
                 pos_decoded_target_preds_aug = torch.cat(
-                    [_xy, _wh, pos_angle_targets_aug], dim=-1)
+                    [_xy_target, _wh_target, angle_use], dim=-1)
 
                 pos_centerness_targets_aug = pos_centerness_targets[
                     pos_inds_aug_v]
@@ -379,32 +509,27 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
                                                            (0, 255, 0)],
                                                show=False,
                                                out_file='./assign_vis_one2one_zero/{}'.format(img_metas[i]['filename'].split('/')[-1]))
-                # else:
-                #     import mmcv
-                #     from mmrotate.core import imshow_det_rbboxes
-                #     import numpy as np
-                #     for i in range(num_imgs):
-                #         box = torch.cat(
-                #             [pos_decoded_bbox_preds_aug[pos_inds_aug_b == i],
-                #              pos_decoded_target_preds_aug[pos_inds_aug_b == i]],
-                #             dim=0).detach().cpu().numpy()
-                #         labels = np.arange(len(box)) // (len(box) // 2)
-                #         img = mmcv.imread(img_metas[i]['filename'])
-                #         img = mmcv.imrotate(img, rot.item() / math.pi * 180)
-                #         imshow_det_rbboxes(img, box, labels,
-                #                            bbox_color=[(255, 0, 0),
-                #                                        (0, 255, 0)])
+                # pos_cr_preds_aug = flatten_cr_preds_aug[pos_inds_aug]
+                # pos_order_preds_aug = flatten_order_preds_aug[pos_inds_aug]
 
+                _xy_aug = pos_decoded_bbox_preds_aug[:, :2]
+                _wh_aug = pos_decoded_bbox_preds_aug[:, 2:4]
+                _radius_aug,pos_angle_preds_aug,_ = compute(_xy_aug,_wh_aug,pos_cr_preds_aug,pos_order_preds_aug)
+                # pos_cr_preds = flatten_cr_preds[pos_inds]
+                # pos_order_preds = flatten_order_preds[pos_inds]
                 loss_bbox_aug = self.loss_bbox_aug(
-                    pos_decoded_bbox_preds_aug,
-                    pos_decoded_target_preds_aug,
-                    weight=pos_centerness_targets_aug,
-                    avg_factor=centerness_denorm_aug)
-
-                if self.seprate_angle:
-                    loss_angle_aug = self.loss_angle_aug(
-                        pos_angle_preds_aug, pos_angle_targets_aug,
-                        avg_factor=num_pos)
+                                                    pos_decoded_bbox_preds_aug,
+                                                    pos_decoded_target_preds_aug,
+                                                    _radius_aug,
+                                                    _radius,
+                                                    pos_angle_preds_aug,
+                                                    pos_angle_targets,
+                                                    weight=pos_centerness_targets_aug,
+                                                    avg_factor=centerness_denorm_aug)
+                # if self.seprate_angle:
+                #     loss_angle_aug = self.loss_angle_aug(
+                #         pos_angle_preds_aug, pos_angle_targets_aug,
+                #         avg_factor=num_pos)
             else:
                 loss_bbox_aug = pos_bbox_preds[[]].sum()
                 if self.seprate_angle:
@@ -415,22 +540,23 @@ class H2RBoxAFWSHead(RotatedFCOSHead):
             #         pos_angle_preds, pos_angle_targets, avg_factor=num_pos)
             loss_centerness = self.loss_centerness(
                 pos_centerness, pos_centerness_targets, avg_factor=num_pos)
-        else:
-            loss_bbox = pos_bbox_preds.sum()
-            loss_bbox_aug = pos_bbox_preds.sum()
-            loss_centerness = pos_centerness.sum()
-            if self.seprate_angle:
-                loss_angle = pos_angle_preds.sum()
-                loss_angle_aug = pos_angle_preds.sum()
+        # else:
+        #     loss_bbox = pos_bbox_preds.sum()
+        #     loss_bbox_aug = pos_bbox_preds.sum()
+        #     loss_centerness = pos_centerness.sum()
+        #     if self.seprate_angle:
+        #         loss_angle = pos_angle_preds.sum()
+        #         loss_angle_aug = pos_angle_preds.sum()
 
         if self.seprate_angle:
-            return dict(
-                loss_cls=loss_cls,
-                loss_bbox=loss_bbox,
-                loss_angle=loss_angle,
-                loss_centerness=loss_centerness,
-                loss_bbox_aug=loss_bbox_aug,
-                loss_angle_aug=loss_angle_aug)
+            pass
+            # return dict(
+            #     loss_cls=loss_cls,
+            #     loss_bbox=loss_bbox,
+            #     loss_angle=loss_angle,
+            #     loss_centerness=loss_centerness,
+            #     loss_bbox_aug=loss_bbox_aug,
+            #     loss_angle_aug=loss_angle_aug)
         else:
             return dict(
                 loss_cls=loss_cls,

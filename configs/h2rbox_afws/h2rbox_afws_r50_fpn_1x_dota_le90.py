@@ -44,7 +44,7 @@ model = dict(
         reassigner='one2one',
         rect_classes=[9, 11],
         bbox_coder=dict(
-            type='DistanceAnglePointCoder', angle_version=angle_version),
+            type='DistanceAngleFreePointCoder', angle_version=angle_version),
         loss_cls=dict(
             type='FocalLoss',
             use_sigmoid=True,
@@ -56,8 +56,9 @@ model = dict(
             type='H2RBoxAFWSLoss',
             loss_weight=0.4,
             center_loss_cfg=dict(type='L1Loss', loss_weight=0.0),
-            shape_loss_cfg=dict(type='IoULoss', loss_weight=1.0),
-            angle_loss_cfg=dict(type='L1Loss', loss_weight=1.0)),
+            order_loss_cfg=dict(type='L1Loss', loss_weight=1.0),
+            circle_loss_cfg=dict(type='CircleIoULoss', loss_weight=1.0)
+            ),
         loss_centerness=dict(
             type='CrossEntropyLoss', use_sigmoid=True, loss_weight=1.0)),
     # training and testing settings
@@ -102,8 +103,8 @@ test_pipeline = [
         ])
 ]
 
-# data_root = '/data/nas/dataset_share/DOTA/split_ss_dota1_0/'
-data_root = 'data/DOTA/'
+data_root = '/mnt/nas/dataset_share/DOTA/split_ss_dota1_0/'
+# data_root = 'data/DOTA/'
 data = dict(
     train=dict(type='DOTAWSOODDataset', pipeline=train_pipeline,
                ann_file=data_root + 'trainval/annfiles/',
