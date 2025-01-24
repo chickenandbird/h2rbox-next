@@ -115,8 +115,8 @@ data = dict(
              img_prefix=data_root + 'trainval/images/',
              version=angle_version),
     test=dict(type='DOTAWSOODDataset', pipeline=test_pipeline,
-              ann_file=data_root + 'test/images/',
-              img_prefix=data_root + 'test/images/',
+              ann_file=data_root + 'trainval/images/',
+              img_prefix=data_root + 'trainval/images/',
               version=angle_version))
 
 custom_imports = dict(

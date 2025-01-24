@@ -846,7 +846,7 @@ def get_best_begin_point(coordinates):
     coordinates = np.array(coordinates)
     return coordinates
 
-
+#Mark一下
 def norm_angle(angle, angle_range):
     """Limit the range of angles.
 

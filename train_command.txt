@@ -1,3 +1,6 @@
 python tools/train.py configs/h2rbox_afws/h2rbox_afws_r50_adamw_fpn_1x_dota_le90.py --gpu-ids 0 --work-dir logs
 ./tools/dist_train.sh ${CONFIG_FILE} ${GPU_NUM} [optional arguments]
 tools/dist_train.sh configs/h2rbox_afws/h2rbox_afws_r50_adamw_fpn_1x_dota_le90.py 2 --work-dir logs --gpu-ids 0 1
+
+
+python tools/test.py configs/h2rbox_abbspo/h2rbox_abbspo_r50_fpn_1x_dota_le90.py log3/epoch_1.pth --show-dir submissions/vis_abbspo_v2

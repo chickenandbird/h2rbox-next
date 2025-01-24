@@ -98,6 +98,7 @@ class RotatedSingleStageDetector(RotatedBaseDetector):
         """
         x = self.extract_feat(img)
         outs = self.bbox_head(x)
+        #test函数从这里进入
         bbox_list = self.bbox_head.get_bboxes(
             *outs, img_metas, rescale=rescale)
 

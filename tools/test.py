@@ -231,8 +231,8 @@ def main():
 
     rank, _ = get_dist_info()
     if rank == 0:
-        import pdb
-        pdb.set_trace()
+        # import pdb
+        # pdb.set_trace()
         if args.out:
             print(f'\nwriting results to {args.out}')
             mmcv.dump(outputs, args.out)

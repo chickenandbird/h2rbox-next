@@ -5,7 +5,7 @@ from mmdet.core import BaseBBoxCoder
 from mmrotate.core.bbox.transforms import norm_angle
 from ..builder import BBOX_CODERS
 
-
+#Mark一下，这里是coder的位置
 @BBOX_CODERS.register_module()
 class DistanceAnglePointCoder(BaseBBoxCoder):
     """Distance Angle Point BBox coder.

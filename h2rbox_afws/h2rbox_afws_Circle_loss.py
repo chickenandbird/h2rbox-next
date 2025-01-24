@@ -51,8 +51,11 @@ class CircleIoULoss(torch.nn.Module):#包括center_loss,circle_loss,order_loss,h
         condition_contain = distance <= torch.abs(_radius_aug - _radius_target)
         intersection[condition_contain] = torch.min(area_aug, area_target)[condition_contain]
 
-        union = area_aug + area_target - intersection        
-        return self.loss_weight * (1-torch.mean(intersection/union))
+        union = area_aug + area_target - intersection   
+        if reduction== 'sum':     
+            return self.loss_weight * (1-torch.sum(intersection/union))
+        else:
+            return self.loss_weight * (1-torch.mean(intersection/union))
 
 
 

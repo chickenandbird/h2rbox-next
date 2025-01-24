@@ -7,7 +7,7 @@ angle_version = 'le90'
 
 # model settings
 model = dict(
-    type='H2RBox',
+    type='H2RBoxABBSPO',
     crop_size=(1024, 1024),
     backbone=dict(
         type='ResNet',
@@ -29,7 +29,7 @@ model = dict(
         num_outs=5,
         relu_before_extra_convs=True),
     bbox_head=dict(
-        type='H2RBoxHead',
+        type='H2RBoxABBSPOHead',
         num_classes=15,
         in_channels=256,
         stacked_convs=4,
@@ -51,9 +51,12 @@ model = dict(
             gamma=2.0,
             alpha=0.25,
             loss_weight=1.0),
-        loss_bbox=dict(type='IoULoss', loss_weight=1.0),
+        loss_bbox=dict(
+            type='AbbIoULoss', 
+            loss_weight=1.0,
+            shape_loss_cfg=dict(type='IoULoss', loss_weight=1.0)),
         loss_bbox_aug=dict(
-            type='H2RBoxLoss',
+            type='H2RBoxABBSPOLoss',
             loss_weight=0.4,
             center_loss_cfg=dict(type='L1Loss', loss_weight=0.0),
             shape_loss_cfg=dict(type='IoULoss', loss_weight=1.0),
@@ -119,7 +122,7 @@ data = dict(
               version=angle_version))
 
 custom_imports = dict(
-    imports=['h2rbox'],
+    imports=['h2rbox_abbspo'],
     allow_failed_imports=False)
 
 log_config = dict(interval=50)

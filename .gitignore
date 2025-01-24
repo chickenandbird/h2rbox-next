@@ -135,3 +135,7 @@ data/
 #checkpoints
 checkpoints/
 logs
+submissions
+log2
+log_abbspo
+log_abbspo_v2
